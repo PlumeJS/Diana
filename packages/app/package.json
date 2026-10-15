@@ -1,0 +1,30 @@
+{
+  "name": "@diana/app",
+  "version": "0.0.0",
+  "description": "Diana 运行时入口：连接、登录、组装服务并启动 OneBot",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "start": "node ./dist/index.js",
+    "build": "tsgo -p tsconfig.json",
+    "typecheck": "tsgo -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@diana/core": "workspace:*",
+    "@diana/onebot": "workspace:*",
+    "qrcode-terminal": "^0.12.0",
+    "yaml": "^2.6.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/qrcode-terminal": "^0.12.2"
+  }
+}

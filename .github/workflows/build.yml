@@ -1,0 +1,144 @@
+name: Build Diana
+
+permissions:
+  contents: write
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - packages/app/**
+      - packages/core/**
+      - packages/onebot/**
+      - scripts/package.mjs
+      - package.json
+      - pnpm-workspace.yaml
+      - pnpm-lock.yaml
+      - .github/workflows/build.yml
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build for ${{ matrix.identifier }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            identifier: win-x64
+            target: win
+          - os: ubuntu-latest
+            identifier: linux-x64
+            target: linux
+          - os: macos-13
+            identifier: macos-x64
+            target: mac
+          - os: macos-latest
+            identifier: macos-arm64
+            target: macarm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      # 仅作为打包工具使用，运行时代码不依赖 Bun
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build packages
+        run: pnpm build
+
+      - name: Package single-file executable
+        run: node scripts/package.mjs ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: diana-${{ matrix.identifier }}
+          path: sea/diana-${{ matrix.identifier }}*
+
+      - name: Write build summary
+        if: success()
+        run: |
+          {
+            echo "## ✅ 构建成功 - ${{ matrix.identifier }}"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| 平台标识 | \`${{ matrix.identifier }}\` |"
+            echo "| 触发提交 | [\`${GITHUB_SHA::7}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) |"
+            echo "| 触发者 | ${{ github.actor }} |"
+            echo "| 构建号 | #${{ github.run_number }} |"
+            echo ""
+            echo "### 产物"
+            echo ""
+            echo "- 文件：\`sea/diana-${{ matrix.identifier }}*\`"
+            echo "- Artifact：\`diana-${{ matrix.identifier }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 发行版号取自根 package.json，构建时已通过 --define 注入到各平台产物横幅
+      - name: Read version
+        id: version
+        run: echo "tag=v$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Show files
+        run: ls -R artifacts
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Diana ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          make_latest: true
+          overwrite_files: true
+          files: |
+            artifacts/**/diana*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Write release summary
+        if: success()
+        run: |
+          {
+            echo "## 🚀 发行版发布成功"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| 标签 | \`${{ steps.version.outputs.tag }}\` |"
+            echo "| 仓库 | ${{ github.repository }} |"
+            echo ""
+            echo "### 包含产物"
+            echo ""
+            echo '```'
+            ls artifacts/**/diana*
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

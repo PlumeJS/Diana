@@ -1,0 +1,38 @@
+{
+  "name": "diana",
+  "version": "1.0.0",
+  "description": "PC NTQQ 协议的 TypeScript 实现",
+  "license": "AGPL-3.0",
+  "author": "Diana contributors",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.14.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "pnpm --filter @diana/app start",
+    "build": "pnpm -r build",
+    "package": "pnpm build && node scripts/package.mjs",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "format": "biome format --write .",
+    "check": "biome check --write .",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.5",
+    "@types/ws": "^8.5.13",
+    "@typescript/native-preview": "^7.0.0-dev.20260707.2",
+    "eslint": "^10.12.0",
+    "globals": "^17.13.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^5.0.4"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
+  }
+}

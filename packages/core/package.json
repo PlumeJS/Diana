@@ -1,0 +1,23 @@
+{
+  "name": "@diana/core",
+  "version": "0.0.0",
+  "description": "Diana 的 QQ (NTQQ) 协议核心实现",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsgo -p tsconfig.json",
+    "typecheck": "tsgo -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "winston": "^3.18.3",
+    "zod": "^4.6.7"
+  }
+}
