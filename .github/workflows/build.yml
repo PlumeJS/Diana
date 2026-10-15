@@ -31,7 +31,7 @@ jobs:
           - os: ubuntu-latest
             identifier: linux-x64
             target: linux
-          - os: macos-13
+          - os: macos-15-intel
             identifier: macos-x64
             target: mac
           - os: macos-latest
