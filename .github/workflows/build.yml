@@ -47,10 +47,9 @@ jobs:
         with:
           node-version: 22
 
+      # 版本由 package.json 的 packageManager 字段决定
       - name: Install pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       # 仅作为打包工具使用，运行时代码不依赖 Bun
       - name: Setup Bun
