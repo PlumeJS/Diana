@@ -5,3 +5,7 @@ coverage/
 .diana/
 sea/
 .bun-cache/
+
+# 私有配置（含签名服务器等私密信息）与客户端信息，不入库
+packages/app/config.yaml
+packages/app/app-info.json
