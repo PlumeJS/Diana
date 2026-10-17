@@ -179,8 +179,18 @@ export class SsoTransport {
     private async buildFrame(command: string, body: Buffer, sequence: number, encryption?: EncryptionType): Promise<Buffer> {
         this.logger.debug(`发送数据包 (cmd=${command}, seq=${sequence})`);
         const provider = this.options.signProvider;
-        const sign = provider && SIGN_COMMANDS.has(command) ? await provider.sign(command, body, sequence) : undefined;
-        return encodeSsoFrame(this.buildPacket(command, body, sequence, sign, encryption));
+        if (SIGN_COMMANDS.has(command)) {
+            // 强制签名校验：需要签名的命令在无签名服务或签名为空时直接失败，避免无签名/坏签名包被发出
+            if (!provider) {
+                throw new DianaError(ErrorCode.Validation, `命令 ${command} 需要签名，但未配置签名服务器 (protocol.signServer)`);
+            }
+            const sign = await provider.sign(command, body, sequence);
+            if (!sign.sign.length) {
+                throw new DianaError(ErrorCode.Protocol, `签名服务返回的签名无效 (cmd=${command}，sign 为空)`);
+            }
+            return encodeSsoFrame(this.buildPacket(command, body, sequence, sign, encryption));
+        }
+        return encodeSsoFrame(this.buildPacket(command, body, sequence, undefined, encryption));
     }
 
     private buildPacket(command: string, body: Buffer, sequence: number, sign?: SignResult, encryption?: EncryptionType): Buffer {

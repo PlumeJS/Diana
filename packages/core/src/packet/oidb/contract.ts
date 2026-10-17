@@ -15,6 +15,8 @@ export class OidbSvcContract<const T extends ProtoModel> {
         readonly subCommand: number,
         bodyFields: T,
         readonly useReserved = false,
+        /** 写入 Oidb.Service（字段 2）的值，默认等于 subCommand；0x6d8 等命令按子功能区分。 */
+        private readonly service: number = subCommand,
     ) {
         this.body = ProtoMessage.of(bodyFields);
     }
@@ -28,7 +30,7 @@ export class OidbSvcContract<const T extends ProtoModel> {
     encode(data: InferProtoModelInput<T>): Buffer {
         return OidbBase.encode({
             command: this.command,
-            subCommand: this.subCommand,
+            subCommand: this.service,
             body: this.body.encode(data),
             properties: [],
             reserved: this.useReserved ? 1 : 0,

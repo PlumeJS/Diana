@@ -10,7 +10,8 @@ describe('签名提供者', () => {
         const calls: Array<{ url: string; body: unknown }> = [];
         vi.stubGlobal('fetch', async (url: string, init: { body: string }) => {
             calls.push({ url, body: JSON.parse(init.body) });
-            return { ok: true, json: async () => ({ value: { sign: 'aabb', token: 'ccdd', extra: 'eeff' } }) };
+            const text = JSON.stringify({ value: { sign: 'aabb', token: 'ccdd', extra: 'eeff' } });
+            return { ok: true, headers: new Headers({ 'content-type': 'application/json' }), text: async () => text };
         });
 
         const provider = createUrlSignProvider('https://sign.example.com/');
@@ -35,7 +36,8 @@ describe('签名提供者', () => {
         const urls: string[] = [];
         vi.stubGlobal('fetch', async (url: string) => {
             urls.push(url);
-            return { ok: true, json: async () => ({ Os: 'Linux', CurrentVersion: '3.2.26-46494', NTLoginType: 1 }) };
+            const text = JSON.stringify({ Os: 'Linux', CurrentVersion: '3.2.26-46494', NTLoginType: 1 });
+            return { ok: true, headers: new Headers({ 'content-type': 'application/json' }), text: async () => text };
         });
 
         const provider = createUrlSignProvider('http://sign.example.com:5991/');

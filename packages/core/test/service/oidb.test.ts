@@ -231,6 +231,12 @@ async function setup(
     const transport = new SsoTransport({
         host: '127.0.0.1',
         port,
+        // 测试用签名桩：满足强制签名校验
+        signProvider: {
+            async sign() {
+                return { sign: Buffer.from('aa', 'hex'), token: Buffer.from('bb', 'hex'), extra: Buffer.from('cc', 'hex') };
+            },
+        },
         session: {
             uin: '10000',
             a2: Buffer.alloc(0),

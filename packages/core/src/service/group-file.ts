@@ -2,16 +2,28 @@ import { DianaError, ErrorCode } from '../common/errors.js';
 import { FileUploadExt } from '../packet/highway.js';
 import {
     broadcastGroupFile,
+    groupFileCount,
+    groupFileCountResponse,
     groupFileDelete,
     groupFileDeleteResponse,
     groupFileDownload,
     groupFileDownloadResponse,
+    groupFileList,
+    groupFileListResponse,
     groupFileMove,
     groupFileMoveResponse,
     groupFileRename,
     groupFileRenameResponse,
+    groupFileSpace,
+    groupFileSpaceResponse,
     groupFileUpload,
     groupFileUploadResponse,
+    groupFolderCreate,
+    groupFolderCreateResponse,
+    groupFolderDelete,
+    groupFolderDeleteResponse,
+    groupFolderRename,
+    groupFolderRenameResponse,
 } from '../packet/oidb/index.js';
 import type { HighwayService } from './highway.js';
 import type { MediaMetadata } from './media.js';
@@ -29,6 +41,38 @@ export interface GroupFileUploadResult {
     checkKey: Buffer;
     uploadIp: string;
     uploadPort: number;
+}
+
+/** 群文件条目（0x6d8 列表视图）。 */
+export interface GroupFileEntry {
+    fileId: string;
+    fileName: string;
+    fileSize: number;
+    uploadTime: number;
+    deadTime: number;
+    modifyTime: number;
+    downloadTimes: number;
+    uploaderUin: number;
+    parentFolderId: string;
+}
+
+/** 群文件夹条目（0x6d8 列表视图）。 */
+export interface GroupFolderEntry {
+    folderId: string;
+    parentFolderId: string;
+    folderName: string;
+    createTime: number;
+    modifyTime: number;
+    createUin: number;
+    totalFileCount: number;
+}
+
+/** 群文件列表结果。 */
+export interface GroupFileListResult {
+    files: GroupFileEntry[];
+    folders: GroupFolderEntry[];
+    isEnd: boolean;
+    nextIndex: number;
 }
 
 /** 群文件服务。 */
@@ -139,5 +183,101 @@ export class GroupFileService {
         await this.oidb.call(groupFileMove, groupFileMoveResponse, {
             move: { groupUin, appId: APP_ID, busId: BUS_ID, fileId, parentDirectory, targetDirectory },
         });
+    }
+
+    /** 创建群文件夹，返回新文件夹 id。 */
+    async createFolder(groupUin: number, name: string): Promise<string> {
+        const response = await this.oidb.call(groupFolderCreate, groupFolderCreateResponse, {
+            create: { groupUin, folderName: name, targetDirectory: '/' },
+        });
+        return response.create?.info?.folderId ?? '';
+    }
+
+    /** 删除群文件夹。 */
+    async deleteFolder(groupUin: number, folderId: string): Promise<void> {
+        await this.oidb.call(groupFolderDelete, groupFolderDeleteResponse, {
+            delete: { groupUin, folderId },
+        });
+    }
+
+    /** 重命名群文件夹。 */
+    async renameFolder(groupUin: number, folderId: string, newFolderName: string): Promise<void> {
+        await this.oidb.call(groupFolderRename, groupFolderRenameResponse, {
+            rename: { groupUin, folderId, newFolderName },
+        });
+    }
+
+    /** 拉取群文件列表（0x6d8 Service=1）。 */
+    async listFiles(groupUin: number, folderId: string, startIndex = 0, fileCount = 60): Promise<GroupFileListResult> {
+        const response = await this.oidb.call(groupFileList, groupFileListResponse, {
+            list: {
+                groupUin: BigInt(groupUin),
+                appId: APP_ID,
+                folderId,
+                fileCount,
+                sortBy: 1,
+                startIndex,
+                sortOrder: 2,
+                showOnlinedocFolder: 0,
+            },
+        });
+        const list = response.list;
+        if (!list) {
+            throw new DianaError(ErrorCode.Protocol, '群文件列表响应缺少必要字段');
+        }
+        const files: GroupFileEntry[] = [];
+        const folders: GroupFolderEntry[] = [];
+        for (const item of list.items) {
+            if (item.type === 1 && item.file) {
+                const file = item.file;
+                files.push({
+                    fileId: file.fileId,
+                    fileName: file.fileName,
+                    fileSize: Number(file.fileSize ?? 0),
+                    uploadTime: file.uploadTime ?? 0,
+                    deadTime: file.deadTime ?? 0,
+                    modifyTime: file.modifyTime ?? 0,
+                    downloadTimes: file.downloadTimes ?? 0,
+                    uploaderUin: Number(file.uploaderUin ?? 0),
+                    parentFolderId: file.parentFolderId ?? '',
+                });
+            } else if (item.type === 2 && item.folder) {
+                const folder = item.folder;
+                folders.push({
+                    folderId: folder.folderId,
+                    parentFolderId: folder.parentFolderId,
+                    folderName: folder.folderName,
+                    createTime: folder.createTime ?? 0,
+                    modifyTime: folder.modifyTime ?? 0,
+                    createUin: Number(folder.createUin ?? 0),
+                    totalFileCount: folder.totalFileCount ?? 0,
+                });
+            }
+        }
+        return { files, folders, isEnd: list.isEnd ?? false, nextIndex: list.nextIndex ?? 0 };
+    }
+
+    /** 拉取群文件计数（0x6d8 Service=2）。 */
+    async getFileCount(groupUin: number): Promise<{ allCount: number; limitCount: number; isFull: boolean }> {
+        const response = await this.oidb.call(groupFileCount, groupFileCountResponse, {
+            count: { groupUin: BigInt(groupUin), appId: APP_ID, busId: 6 },
+        });
+        const count = response.count;
+        if (!count) {
+            throw new DianaError(ErrorCode.Protocol, '群文件计数响应缺少必要字段');
+        }
+        return { allCount: count.allFileCount ?? 0, limitCount: count.limitCount ?? 0, isFull: count.isFull ?? false };
+    }
+
+    /** 拉取群文件空间信息（0x6d8 Service=3）。 */
+    async getSpace(groupUin: number): Promise<{ totalSpace: number; usedSpace: number }> {
+        const response = await this.oidb.call(groupFileSpace, groupFileSpaceResponse, {
+            space: { groupUin: BigInt(groupUin), appId: APP_ID },
+        });
+        const space = response.space;
+        if (!space) {
+            throw new DianaError(ErrorCode.Protocol, '群文件空间响应缺少必要字段');
+        }
+        return { totalSpace: Number(space.totalSpace ?? 0), usedSpace: Number(space.usedSpace ?? 0) };
     }
 }

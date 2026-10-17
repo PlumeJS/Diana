@@ -23,6 +23,8 @@ import {
     LargeFaceInfo,
     LongMsgInterfaceReq,
     LongMsgInterfaceRsp,
+    MentionExtra,
+    MentionType,
     MessageElement,
     MsgInfo,
     PbMultiMsgTransmit,
@@ -51,7 +53,7 @@ import {
     SEND_MESSAGE_COMMAND,
     SsoTransport,
 } from '../../src/service/index.js';
-import type { ForwardNode, IncomingMessage } from '../../src/service/index.js';
+import type { ForwardNode, IncomingMessage, SignProvider } from '../../src/service/index.js';
 import { decodeTlv, encodeTlv } from '../../src/tlv/index.js';
 import type { TlvData } from '../../src/tlv/index.js';
 
@@ -181,6 +183,12 @@ async function setup(options: SetupOptions = {}): Promise<MessageService> {
     const transport = new SsoTransport({
         host: '127.0.0.1',
         port,
+        // 测试用签名桩：满足强制签名校验
+        signProvider: {
+            async sign() {
+                return { sign: Buffer.from('aa', 'hex'), token: Buffer.from('bb', 'hex'), extra: Buffer.from('cc', 'hex') };
+            },
+        } satisfies SignProvider,
         session: {
             uin: '10000',
             uid: 'u_self',
@@ -472,6 +480,26 @@ describe('富媒体消息', () => {
         const message = parseIncomingMessage(pushWith([src, text]));
         expect(message?.repliedSequence).toBe(42);
         expect(message?.segments).toEqual([{ type: 'text', content: 'ok' }]);
+    });
+
+    it('引用推送中指向被引用者的 @ 占位不会重复上报', () => {
+        const mention = (str: string) =>
+            MessageElement.encode({
+                text: {
+                    str,
+                    pbReserve: MentionExtra.encode({ type: MentionType.Someone, uin: 999, uid: 'u_x' }),
+                },
+            });
+        const src = MessageElement.encode({
+            srcMsg: { origSeqs: [42], senderUin: 999, pbReserve: { friendSequence: 42 } },
+        });
+        // srcMsg 后的第一个 @ 是引用占位，第二个才是真实 @
+        const message = parseIncomingMessage(pushWith([src, mention('@999'), mention('@999'), MessageElement.encode({ text: { str: ' 1' } })]));
+        expect(message?.repliedSequence).toBe(42);
+        expect(message?.segments).toEqual([
+            { type: 'mention', name: '@999', uin: 999 },
+            { type: 'text', content: ' 1' },
+        ]);
     });
 });
 

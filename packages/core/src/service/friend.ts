@@ -1,6 +1,7 @@
 import type { UserInfoGender } from '../common/user-info.js';
 import { UserInfoKey } from '../common/user-info.js';
 import {
+    deleteFriendContract,
     fetchFriendsContract,
     fetchFriendsResponseContract,
     nudgeContract,
@@ -111,5 +112,20 @@ export class FriendService {
     /** 同意/拒绝好友申请。 */
     async handleFriendRequest(targetUid: string, accept: boolean): Promise<void> {
         await this.oidb.send(setFriendRequestContract, { accept: accept ? 3 : 5, targetUid });
+    }
+
+    /** 删除好友（0x126b_0，对齐 acidify DeleteFriend）。 */
+    async deleteFriend(targetUid: string, block = false): Promise<void> {
+        await this.oidb.send(deleteFriendContract, {
+            body: {
+                targetUid,
+                field2: {
+                    field1: 130,
+                    field2: 109,
+                    field3: { field1: 8, field2: 8, field3: 50 },
+                },
+                block,
+            },
+        });
     }
 }

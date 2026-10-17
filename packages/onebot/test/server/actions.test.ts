@@ -51,6 +51,10 @@ function createCtx(reply?: { sequence: number; senderUin: number; senderUid?: st
     const forwards: Array<{ target: unknown; nodes: unknown[] }> = [];
     const fetched: Array<{ target: unknown; resId: string }> = [];
     const forwardMessages: Array<{ target: unknown; resId: string }> = [];
+    const roamQueries: Array<{ uid: string; time: number; count: number }> = [];
+    const groupFileActions: Array<{ name: string; args: unknown[] }> = [];
+    const privateFileActions: Array<{ name: string; args: unknown[] }> = [];
+    const cookieQueries: string[][] = [];
     const groupImage = async (groupUin: number, _data: Buffer, image: { width: number; height: number }) => {
         images.push({ target: groupUin, width: image.width, height: image.height });
         return { msgInfo: MSG_INFO, compat: COMPAT_FACE };
@@ -137,6 +141,20 @@ function createCtx(reply?: { sequence: number; senderUin: number; senderUid?: st
                 ];
             },
             fetchC2CLatestSequence: async () => 80,
+            fetchRoamMessages: async (uid: string, time: number, count: number) => {
+                roamQueries.push({ uid, time, count });
+                return [
+                    {
+                        type: 1,
+                        time: 100,
+                        senderUin: 20001,
+                        targetUin: 10000,
+                        senderName: 'Alice',
+                        sequence: 1,
+                        segments: [{ type: 'text', content: 'hi' }],
+                    },
+                ];
+            },
             getCachedMessage: (sequence: number) =>
                 sequence === 42
                     ? {
@@ -231,10 +249,58 @@ function createCtx(reply?: { sequence: number; senderUin: number; senderUid?: st
             uploadGroupVideo: groupVideo,
             uploadPrivateVideo: privateVideo,
         },
-        groupFile: {},
+        groupFile: {
+            upload: async (groupUin: number, targetDirectory: string, fileName: string) => {
+                groupFileActions.push({ name: 'upload', args: [groupUin, targetDirectory, fileName] });
+            },
+            getDownloadUrl: async (groupUin: number, fileId: string) => {
+                groupFileActions.push({ name: 'getDownloadUrl', args: [groupUin, fileId] });
+                return 'https://example.com/file';
+            },
+            delete: async (groupUin: number, fileId: string) => {
+                groupFileActions.push({ name: 'delete', args: [groupUin, fileId] });
+            },
+            rename: async (groupUin: number, fileId: string, parentDirectory: string, newName: string) => {
+                groupFileActions.push({ name: 'rename', args: [groupUin, fileId, parentDirectory, newName] });
+            },
+            move: async (groupUin: number, fileId: string, parentDirectory: string, targetDirectory: string) => {
+                groupFileActions.push({ name: 'move', args: [groupUin, fileId, parentDirectory, targetDirectory] });
+            },
+        },
+        privateFile: {
+            upload: async (uin: number, uid: string, fileName: string) => {
+                privateFileActions.push({ name: 'upload', args: [uin, uid, fileName] });
+            },
+        },
+        system: {
+            fetchCookies: async (domains: string[]) => {
+                cookieQueries.push(domains);
+                return { p_skey: 'abc', skey: 'def' };
+            },
+            fetchCsrfToken: async () => 123456,
+        },
         highway: {},
     } as unknown as OneBotContext;
-    return { ctx, images, records, videos, sent, recalls, likes, groupActions, friendActions, pokes, forwards, fetched, forwardMessages, historyQueries };
+    return {
+        ctx,
+        images,
+        records,
+        videos,
+        sent,
+        recalls,
+        likes,
+        groupActions,
+        friendActions,
+        pokes,
+        forwards,
+        fetched,
+        forwardMessages,
+        historyQueries,
+        roamQueries,
+        groupFileActions,
+        privateFileActions,
+        cookieQueries,
+    };
 }
 
 describe('历史消息 API', () => {
@@ -380,6 +446,30 @@ describe('动作处理', () => {
         expect(card.app).toBe('com.tencent.multimsg');
         expect(card.meta.detail.resid).toBe('res-group');
         expect(card.meta.detail.news.map((item: { text: string }) => item.text)).toEqual(['Alice: hi', 'Bob: yo']);
+    });
+
+    it('send_group_forward_msg 接受 messages 字段与 uin/name 别名节点', async () => {
+        const { ctx, forwards } = createCtx();
+        const response = await handleAction(ctx, 'send_group_forward_msg', {
+            group_id: 888,
+            messages: [{ type: 'node', data: { uin: '20001', name: '爱神', content: [{ type: 'text', data: { text: 'hi' } }] } }],
+        });
+
+        expect(response).toMatchObject({ status: 'ok' });
+        expect(forwards[0]?.nodes).toEqual([
+            { uin: 20001, nickname: '爱神', time: expect.any(Number), segments: [{ type: 'text', content: 'hi' }] },
+        ]);
+    });
+
+    it('send_private_forward_msg 接受 messages 字段', async () => {
+        const { ctx, forwards } = createCtx();
+        const response = await handleAction(ctx, 'send_private_forward_msg', {
+            user_id: 20001,
+            messages: [{ type: 'node', data: { user_id: '20001', nickname: 'Alice', content: 'hi' } }],
+        });
+
+        expect(response).toMatchObject({ status: 'ok' });
+        expect(forwards[0]?.target).toEqual({ kind: 'private', uin: 20001, uid: 'u_20001' });
     });
 
     it('forward 段拉取内容后以卡片重新转发', async () => {
@@ -550,12 +640,97 @@ describe('动作处理', () => {
         expect(forwardMessages[0]?.resId).toBe('res-9');
     });
 
-    it('无协议实现的 action 返回失败', async () => {
+    it('未知 action 返回失败', async () => {
         const { ctx } = createCtx();
-        for (const action of ['get_cookies', 'get_csrf_token', 'get_credentials', 'get_group_honor_info', 'set_group_anonymous', 'set_restart']) {
+        const response = await handleAction(ctx, 'nonexistent_action', {});
+        expect(response).toMatchObject({ status: 'failed', retcode: 1404 });
+    });
+
+    it('降级 action 返回成功空结果', async () => {
+        const { ctx } = createCtx();
+        for (const action of ['_set_model_show', 'set_model_show', 'set_restart', 'set_group_anonymous', 'set_group_anonymous_ban']) {
             const response = await handleAction(ctx, action, {});
-            expect(response).toMatchObject({ status: 'failed', retcode: 1404 });
+            expect(response).toMatchObject({ status: 'ok', data: null });
         }
+        expect(await handleAction(ctx, 'get_online_clients', {})).toMatchObject({ status: 'ok', data: { clients: [] } });
+        expect(await handleAction(ctx, 'get_guild_list', {})).toMatchObject({ status: 'ok', data: [] });
+        expect(await handleAction(ctx, 'get_guild_service_profile', {})).toMatchObject({ status: 'ok', data: null });
+        expect(await handleAction(ctx, '_get_model_show', {})).toMatchObject({ status: 'ok', data: { variants: [] } });
+        expect(await handleAction(ctx, 'get_group_honor_info', { group_id: 888 })).toMatchObject({
+            status: 'ok',
+            data: { group_id: 888, talkative_list: [], performer_list: [], legend_list: [], strong_newbie_list: [], emotion_list: [] },
+        });
+    });
+
+    it('get_cookies 返回拼接后的 Cookie 串', async () => {
+        const { ctx, cookieQueries } = createCtx();
+        const response = await handleAction(ctx, 'get_cookies', {});
+        expect(response).toMatchObject({ status: 'ok', data: { cookies: 'p_skey=abc; skey=def' } });
+        expect(cookieQueries[0]).toContain('qun.qq.com');
+
+        const single = await handleAction(ctx, 'get_cookies', { domain: 'docs.qq.com' });
+        expect(single).toMatchObject({ status: 'ok' });
+        expect(cookieQueries[1]).toEqual(['docs.qq.com']);
+    });
+
+    it('get_csrf_token 返回本地计算的 bkn', async () => {
+        const { ctx } = createCtx();
+        expect(await handleAction(ctx, 'get_csrf_token', {})).toMatchObject({ status: 'ok', data: { token: 123456 } });
+    });
+
+    it('get_credentials 同时返回 Cookie 与 csrf_token', async () => {
+        const { ctx } = createCtx();
+        expect(await handleAction(ctx, 'get_credentials', {})).toMatchObject({
+            status: 'ok',
+            data: { cookies: 'p_skey=abc; skey=def', csrf_token: 123456 },
+        });
+    });
+
+    it('get_roam_msg 按 uid 拉取漫游消息', async () => {
+        const { ctx, roamQueries } = createCtx();
+        const response = await handleAction(ctx, 'get_roam_msg', { user_id: 20001, count: 5 });
+        expect(response).toMatchObject({ status: 'ok', data: { messages: [{ message_id: expect.any(Number) }] } });
+        expect(roamQueries[0]).toMatchObject({ uid: 'u_20001', count: 5 });
+    });
+
+    it('upload_group_file 上传群文件', async () => {
+        const { ctx, groupFileActions } = createCtx();
+        const response = await handleAction(ctx, 'upload_group_file', {
+            group_id: 888,
+            file: 'data:text/plain;base64,SGVsbG8=',
+            name: 'log.txt',
+            folder: '/docs',
+        });
+        expect(response).toMatchObject({ status: 'ok' });
+        expect(groupFileActions).toEqual([{ name: 'upload', args: [888, '/docs', 'log.txt'] }]);
+    });
+
+    it('upload_private_file 上传私聊文件', async () => {
+        const { ctx, privateFileActions } = createCtx();
+        const response = await handleAction(ctx, 'upload_private_file', {
+            user_id: 20001,
+            file: 'data:text/plain;base64,SGVsbG8=',
+            name: 'log.txt',
+        });
+        expect(response).toMatchObject({ status: 'ok' });
+        expect(privateFileActions).toEqual([{ name: 'upload', args: [20001, 'u_20001', 'log.txt'] }]);
+    });
+
+    it('群文件 URL / 删除 / 重命名 / 移动', async () => {
+        const { ctx, groupFileActions } = createCtx();
+        expect(await handleAction(ctx, 'get_group_file_url', { group_id: 888, file_id: 'f1' })).toMatchObject({
+            status: 'ok',
+            data: { url: 'https://example.com/file' },
+        });
+        await handleAction(ctx, 'delete_group_file', { group_id: 888, file_id: 'f1' });
+        await handleAction(ctx, 'rename_group_file', { group_id: 888, file_id: 'f1', current_parent_directory: '/a', new_name: 'b.txt' });
+        await handleAction(ctx, 'move_group_file', { group_id: 888, file_id: 'f1', current_parent_directory: '/a', target_parent_directory: '/c' });
+        expect(groupFileActions).toEqual([
+            { name: 'getDownloadUrl', args: [888, 'f1'] },
+            { name: 'delete', args: [888, 'f1'] },
+            { name: 'rename', args: [888, 'f1', '/a', 'b.txt'] },
+            { name: 'move', args: [888, 'f1', '/a', '/c'] },
+        ]);
     });
 
     it('send_group_forward_msg 复用群消息发送', async () => {
@@ -566,5 +741,31 @@ describe('动作处理', () => {
         });
         expect(response).toMatchObject({ status: 'ok' });
         expect(sent[0]).toMatchObject({ groupUin: 888 });
+    });
+
+    it('send_msg 依据 group_id 路由到群聊', async () => {
+        const { ctx, sent } = createCtx();
+        const response = await handleAction(ctx, 'send_msg', { group_id: 888, message: 'hi' });
+        expect(response).toMatchObject({ status: 'ok', data: { message_id: 7 } });
+        expect(sent[0]).toMatchObject({ groupUin: 888 });
+        expect(sent[0]?.uin).toBeUndefined();
+    });
+
+    it('send_msg 群聊含图片时不会误判为私聊', async () => {
+        const { ctx, images, sent } = createCtx();
+        const response = await handleAction(ctx, 'send_msg', {
+            group_id: 888,
+            message: [{ type: 'image', data: { file: pngBase64(2, 2) } }],
+        });
+        expect(response).toMatchObject({ status: 'ok' });
+        expect(images).toEqual([{ target: 888, width: 2, height: 2 }]);
+        expect(sent[0]).toMatchObject({ groupUin: 888 });
+    });
+
+    it('send_msg 依据 user_id 路由到私聊', async () => {
+        const { ctx, sent } = createCtx();
+        const response = await handleAction(ctx, 'send_msg', { user_id: 20001, message: 'hi' });
+        expect(response).toMatchObject({ status: 'ok', data: { message_id: 8 } });
+        expect(sent[0]).toMatchObject({ uin: 20001 });
     });
 });

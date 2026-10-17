@@ -68,6 +68,11 @@ export const loginPack = [
         tag: '0x521',
         schema: [scalarField('productType', 'uint32'), stringField('productDesc', 'uint16')],
     },
+    {
+        // pskey 域名登记列表，对齐 Lagrange 的 Tlv511
+        tag: '0x511',
+        schema: [scalarField('domainCount', 'uint16'), bytesField('domainEntries')],
+    },
 ] as const;
 
 /** 0x144 体 TLV 集合。 */

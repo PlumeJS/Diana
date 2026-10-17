@@ -56,6 +56,8 @@ export const SIGN_COMMANDS = new Set<string>([
     'OidbSvcTrpcTcp.0xf67_1',
     'OidbSvcTrpcTcp.0xf67_5',
     'OidbSvcTrpcTcp.0x6d9_4',
+    'OidbSvcTrpcTcp.0x102a_0',
+    'OidbSvcTrpcTcp.0x102a_1',
 ]);
 
 const signResponseSchema = z.object({
@@ -66,9 +68,37 @@ const signResponseSchema = z.object({
     }),
 });
 
+/** 校验签名服务返回的字段为合法 hex；sign 必须非空，token/extra 允许为空（部分命令为空属正常）。 */
+function decodeHexField(name: string, value: string, required: boolean): Buffer {
+    if (!value && !required) {
+        return Buffer.alloc(0);
+    }
+    const buffer = Buffer.from(value, 'hex');
+    if (!value || buffer.length === 0 || /[^0-9a-f]/i.test(value)) {
+        throw new DianaError(ErrorCode.Protocol, `签名服务返回的 ${name} 字段无效`);
+    }
+    return buffer;
+}
+
 /** 在签名服务基础地址后追加 `appinfo` 路径段，语义对齐 acidify 的 `appendPathSegments`。 */
 function appInfoUrl(base: string): string {
     return `${base.replace(/\/+$/, '')}/appinfo`;
+}
+
+/** 校验签名服务响应为 JSON（content-type 或内容探测），失败抛出明确错误而非裸 SyntaxError。 */
+async function readJsonResponse(response: Response): Promise<unknown> {
+    const contentType = response.headers.get('content-type') ?? '';
+    const text = await response.text();
+    if (!contentType.includes('json')) {
+        const preview = text.slice(0, 80).replace(/\s+/g, ' ');
+        throw new DianaError(ErrorCode.Network, `签名服务器响应不是 JSON（content-type=${contentType || '无'}）: ${preview}`);
+    }
+    try {
+        return JSON.parse(text);
+    } catch {
+        const preview = text.slice(0, 80).replace(/\s+/g, ' ');
+        throw new DianaError(ErrorCode.Network, `签名服务器响应解析 JSON 失败: ${preview}`);
+    }
 }
 
 /** 基于 HTTP 签名服务器的提供者。 */
@@ -87,11 +117,11 @@ export function createUrlSignProvider(url: string, token?: string): SignProvider
             if (!response.ok) {
                 throw new DianaError(ErrorCode.Network, `签名服务器返回 ${response.status}`);
             }
-            const value = signResponseSchema.parse(await response.json()).value;
+            const value = signResponseSchema.parse(await readJsonResponse(response)).value;
             return {
-                sign: Buffer.from(value.sign, 'hex'),
-                token: Buffer.from(value.token, 'hex'),
-                extra: Buffer.from(value.extra, 'hex'),
+                sign: decodeHexField('sign', value.sign, true),
+                token: decodeHexField('token', value.token, false),
+                extra: decodeHexField('extra', value.extra, false),
             };
         },
         async getAppInfo(): Promise<Partial<AppInfo> | null> {
@@ -99,7 +129,12 @@ export function createUrlSignProvider(url: string, token?: string): SignProvider
             if (!response.ok) {
                 return null;
             }
-            return (await response.json()) as Partial<AppInfo>;
+            try {
+                return (await readJsonResponse(response)) as Partial<AppInfo>;
+            } catch {
+                // /appinfo 非关键路径，格式异常时回退本地 AppInfo
+                return null;
+            }
         },
     };
 }

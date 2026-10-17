@@ -33,7 +33,7 @@ import {
     transEmp31ResponseSchema,
 } from '../../src/packet/login/index.js';
 import { Keystore, LoginService, SsoTransport } from '../../src/service/index.js';
-import type { LoginContext } from '../../src/service/index.js';
+import type { LoginContext, SignProvider } from '../../src/service/index.js';
 import { decodeTlv, encodeTlv, packTlv } from '../../src/tlv/index.js';
 import type { TlvData } from '../../src/tlv/index.js';
 import { BytesReader, BytesWriter } from '../../src/util/bytes.js';
@@ -226,6 +226,12 @@ async function setupLogin(options: MockOptions = {}): Promise<SetupResult> {
     const transport = new SsoTransport({
         host: '127.0.0.1',
         port,
+        // 测试用签名桩：满足强制签名校验
+        signProvider: {
+            async sign() {
+                return { sign: Buffer.from('aa', 'hex'), token: Buffer.from('bb', 'hex'), extra: Buffer.from('cc', 'hex') };
+            },
+        } satisfies SignProvider,
         session: {
             uin: String(keystore.uin),
             a2: keystore.session.a2,

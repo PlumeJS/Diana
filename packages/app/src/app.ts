@@ -8,6 +8,7 @@ import {
     DianaError,
     Ecdh,
     ErrorCode,
+    EssenceService,
     FriendService,
     GroupFileService,
     GroupService,
@@ -134,6 +135,9 @@ export async function start(config: AppConfig): Promise<DianaApp> {
     const signProvider = config.protocol.signServer
         ? createUrlSignProvider(config.protocol.signServer, config.protocol.signToken || undefined)
         : undefined;
+    if (!signProvider) {
+        log.warn('未配置签名服务器 (protocol.signServer)，需要签名的命令将被拒绝发送');
+    }
     const appInfo = await resolveAppInfo(config.protocol, signProvider, log);
     const persisted = loadSession(config.sessionFile);
     const deviceInfo: DeviceInfo = persisted
@@ -174,6 +178,10 @@ export async function start(config: AppConfig): Promise<DianaApp> {
                 saveSession(config.sessionFile, currentSession(keystore, deviceInfo.guid.toString('hex'), transport));
                 log.info('会话已通过 a1 续期');
             } catch (error) {
+                // 签名服务异常（网络/格式/签名无效）时中断流程，避免在无有效签名的情况下继续登录
+                if (error instanceof DianaError && error.code !== ErrorCode.Login) {
+                    throw new DianaError(ErrorCode.Network, `签名服务不可用，已中止登录：${error.message}`, { cause: error });
+                }
                 log.warn('会话续期失败，沿用已保存的会话', error);
             }
         }
@@ -232,6 +240,7 @@ export async function start(config: AppConfig): Promise<DianaApp> {
 
     const ctx: OneBotContext = {
         selfId: keystore.uin,
+        appVersion: appInfo.CurrentVersion,
         transport,
         message: new MessageService(transport, config.protocol.os),
         notify: new NotifyService(transport),
@@ -240,6 +249,7 @@ export async function start(config: AppConfig): Promise<DianaApp> {
         user: new UserService(oidb),
         media: new MediaService(oidb, highway, keystore.session.uid),
         groupFile: new GroupFileService(oidb, highway),
+        essence: new EssenceService(oidb, system),
         privateFile: new PrivateFileService(oidb, highway, transport, keystore.uin),
         highway,
         system,

@@ -31,10 +31,16 @@ export const atSchema = z.object({
     data: z.object({ qq: z.union([z.string(), z.literal('all')]), name: z.string().optional() }),
 });
 
-/** 回复段。 */
+/** 回复段。除 id 外可携带被引用消息的文本/发送者/时间等信息。 */
 export const replySchema = z.object({
     type: z.literal('reply'),
-    data: z.object({ id: z.string() }),
+    data: z.object({
+        id: z.string(),
+        text: z.string().optional(),
+        qq: z.string().optional(),
+        time: z.number().optional(),
+        seq: z.number().optional(),
+    }),
 });
 
 /** 语音段。 */
@@ -86,6 +92,10 @@ export const nodeSchema = z.object({
     data: z.object({
         user_id: z.string().optional(),
         nickname: z.string().optional(),
+        // 兼容 Yunzai 等客户端使用的 `uin` / `name` 别名与 `time` 字段
+        uin: z.string().optional(),
+        name: z.string().optional(),
+        time: z.number().optional(),
         content: z.unknown(),
     }),
 });

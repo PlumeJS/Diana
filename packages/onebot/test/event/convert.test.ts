@@ -1,7 +1,7 @@
 import { MessageType } from '@diana/core';
 import type { IncomingMessage, Notification } from '@diana/core';
 import { describe, expect, it } from 'vitest';
-import { toLifecycleEvent, toMessageEvent, toNoticeEvent, toRequestEvent } from '../../src/event/convert.js';
+import { toLifecycleEvent, toMessageData, toMessageEvent, toNoticeEvent, toRequestEvent } from '../../src/event/convert.js';
 
 const groupMessage: IncomingMessage = {
     type: MessageType.GroupMessage,
@@ -40,11 +40,32 @@ describe('事件转换', () => {
             time: 1700000000,
         });
         expect(event.raw_message).toBe('[CQ:at,qq=10000] hi[CQ:face,id=14]');
-        expect(event.sender).toEqual({ user_id: 20001, nickname: 'Alice' });
+        expect(event.sender).toEqual({ user_id: 20001, nickname: 'Alice', card: 'Alice' });
         expect(event.message).toEqual([
-            { type: 'at', data: { qq: '10000' } },
+            { type: 'at', data: { qq: '10000', name: '@Bot' } },
             { type: 'text', data: { text: ' hi' } },
             { type: 'face', data: { id: '14' } },
+        ]);
+    });
+
+    it('入站引用消息前置 reply 段', async () => {
+        const event = await toMessageEvent(
+            { ...groupMessage, repliedSequence: 7, segments: [{ type: 'text', content: 'hi' }] },
+            10000,
+        );
+        expect(event.message).toEqual([
+            { type: 'reply', data: { id: '7' } },
+            { type: 'text', data: { text: 'hi' } },
+        ]);
+        expect(event.raw_message).toBe('[CQ:reply,id=7]hi');
+    });
+
+    it('消息数据结构包含 message_type 与 reply 段', async () => {
+        const data = await toMessageData({ ...groupMessage, repliedSequence: 7, segments: [{ type: 'text', content: 'hi' }] });
+        expect(data).toMatchObject({ message_type: 'group', group_id: 888, user_id: 20001, raw_message: '[CQ:reply,id=7]hi' });
+        expect(data.message).toEqual([
+            { type: 'reply', data: { id: '7' } },
+            { type: 'text', data: { text: 'hi' } },
         ]);
     });
 
@@ -200,7 +221,7 @@ describe('事件转换', () => {
         ).toMatchObject({ notice_type: 'group_name_change', group_id: 888, operator_id: 20002, name: 'NewName' });
         expect(
             await toNoticeEvent(
-                { type: 'groupReaction', groupUin: 888, sequence: 9, operatorUid: 'u_op', code: '1', count: 3, isAdd: true },
+                { type: 'groupReaction', groupUin: 888, sequence: 9, operatorUid: 'u_op', code: '1', reactionType: 1, count: 3, isAdd: true },
                 10000,
                 resolveUin,
             ),
@@ -211,6 +232,7 @@ describe('事件转换', () => {
             message_id: 9,
             operator_id: 20002,
             code: '1',
+            reaction_type: 1,
             count: 3,
         });
     });

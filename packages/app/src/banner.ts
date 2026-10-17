@@ -3,21 +3,28 @@ import { resolve } from 'node:path';
 
 /**
  * 读取版本号。
- * 单文件可执行程序在打包时通过 Bun define 注入 `process.env.DIANA_VERSION`；
- * 开发/源码运行（dist/banner.js）时回退到读取 ../package.json。
+ * 单文件可执行程序在打包时通过 define 注入 `process.env.DIANA_VERSION`；
+ * 开发/源码运行（dist/banner.js）时回退到读取根 package.json。
  */
 function readVersion(): string {
     const injected = process.env.DIANA_VERSION;
     if (injected) {
         return injected;
     }
-    try {
-        const pkgPath = resolve(import.meta.dirname, '../package.json');
-        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string };
-        return pkg.version ?? '0.0.0';
-    } catch {
-        return '0.0.0';
+    // dist/banner.js → 根目录需上溯三级（dist → packages/app → packages → 根）
+    for (const relative of ['../../../package.json', '../package.json']) {
+        try {
+            const pkg = JSON.parse(readFileSync(resolve(import.meta.dirname, relative), 'utf8')) as {
+                version?: string;
+            };
+            if (pkg.version) {
+                return pkg.version;
+            }
+        } catch {
+            // 尝试下一个路径
+        }
     }
+    return '0.0.0';
 }
 
 /** ANSI 颜色。 */
@@ -50,6 +57,7 @@ export function printBanner(extra?: Record<string, string>): void {
 
     const entries: [string, string][] = [
         ['version', readVersion()],
+        ['node', process.version],
         ...Object.entries(extra ?? {}),
         ['built at', new Date().toLocaleString()],
     ];

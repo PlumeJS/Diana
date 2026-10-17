@@ -11,6 +11,8 @@ import {
     muteAllMembersContract,
     muteMemberContract,
     addGroupReactionContract,
+    groupClockInContract,
+    groupClockInResponseContract,
     nudgeContract,
     quitGroupContract,
     removeGroupReactionContract,
@@ -28,6 +30,15 @@ import type { OidbService } from './oidb.js';
 
 function randomUInt32(): number {
     return randomInt(0, 0x1_0000_0000);
+}
+
+/** 群打卡结果。 */
+export interface GroupClockInResult {
+    title: string;
+    keepDayText: string;
+    groupRankText: string;
+    clockInTime: number;
+    detailUrl: string;
 }
 
 /** 群信息。 */
@@ -310,5 +321,32 @@ export class GroupService {
             accept: accept ? 1 : 2,
             body: { sequence: BigInt(sequence), eventType, groupUin: BigInt(groupUin), message: reason },
         });
+    }
+
+    /** 群打卡（0xeb7_1，对齐 Lagrange GroupClockInService）。 */
+    async clockIn(groupUin: number, selfUin: number, clientVersion: string): Promise<GroupClockInResult> {
+        const response = await this.oidb.call(groupClockInContract, groupClockInResponseContract, {
+            signInWrite: {
+                uid: String(selfUin),
+                groupId: String(groupUin),
+                clientVersion,
+            },
+        });
+        const write = response.signInWrite;
+        if (!write?.doneInfo) {
+            throw new DianaError(ErrorCode.Protocol, '群打卡响应缺少必要字段');
+        }
+        if (write.ret && write.ret.code !== 0) {
+            throw new DianaError(ErrorCode.Oidb, `群打卡失败 (code=${write.ret.code}): ${write.ret.msg ?? ''}`);
+        }
+        const words = write.doneInfo.belowPortraitWords;
+        const clockInTime = words && words.length > 1 ? (Number(words[1]) || 0) : 0;
+        return {
+            title: write.doneInfo.leftTitleWord ?? '',
+            keepDayText: write.doneInfo.rightDescWord ?? '',
+            groupRankText: words?.[0] ?? '',
+            clockInTime,
+            detailUrl: write.doneInfo.recordUrl ?? '',
+        };
     }
 }

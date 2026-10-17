@@ -35,6 +35,37 @@ const FETCH_QR_SUB_COMMAND = 0x31;
 const QUERY_QR_SUB_COMMAND = 0x12;
 const MIN_QUERY_INTERVAL = 2000;
 
+/** 登录时通过 TLV 0x511 登记的 pskey 域名列表，对齐 Lagrange 的 Tlv511。 */
+const PSKEY_DOMAINS = [
+    'qq.com',
+    'office.qq.com',
+    'qun.qq.com',
+    'gamecenter.qq.com',
+    'docs.qq.com',
+    'mail.qq.com',
+    'tim.qq.com',
+    'ti.qq.com',
+    'vip.qq.com',
+    'tenpay.com',
+    'qqweb.qq.com',
+    'qzone.qq.com',
+    'mma.qq.com',
+    'game.qq.com',
+    'openmobile.qq.com',
+    'connect.qq.com',
+] as const;
+
+/** 编码 0x511 域名条目：每个条目为 1 字节标志（0x01）+ uint16 长度前缀的域名。 */
+function encodePskeyDomains(domains: readonly string[]): Buffer {
+    const writer = new BytesWriter();
+    for (const domain of domains) {
+        writer.writeUInt8(1);
+        writer.writeUInt16BE(Buffer.byteLength(domain));
+        writer.writeBuffer(Buffer.from(domain));
+    }
+    return writer.toBuffer();
+}
+
 /** 二维码信息。 */
 export interface QrCodeInfo {
     /** 二维码图片数据。 */
@@ -298,6 +329,7 @@ export class LoginService {
             '0x16a': { noPicSig: keystore.session.noPicSig ?? Buffer.alloc(0) },
             '0x166': { imageType: 5 },
             '0x521': { productType: 0x13, productDesc: 'basicim' },
+            '0x511': { domainCount: PSKEY_DOMAINS.length, domainEntries: encodePskeyDomains(PSKEY_DOMAINS) },
         });
 
         const request = new BytesWriter().writeUInt16BE(0x09).writeBuffer(tlvPack).toBuffer();

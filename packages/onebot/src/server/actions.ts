@@ -1,3 +1,7 @@
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { writeFile } from 'node:fs/promises';
 import {
     buildForwardCard,
     computeMediaMetadata,
@@ -103,6 +107,23 @@ function toMember(groupId: number, member: GroupMember) {
         title_expire_time: 0,
         card_changeable: true,
     };
+}
+
+/** 获取网页 Cookie 时默认请求的域名列表。 */
+const DEFAULT_COOKIE_DOMAINS = [
+    'qun.qq.com',
+    'connect.qq.com',
+    'docs.qq.com',
+    'guopan.qq.com',
+    'gamecenter.qq.com',
+    'office.qq.com',
+];
+
+/** 将 Cookie 键值对拼接为 `key=value; key=value` 形式。 */
+function joinCookies(cookies: Record<string, string>): string {
+    return Object.entries(cookies)
+        .map(([key, value]) => `${key}=${value}`)
+        .join('; ');
 }
 
 /** 发送目标。 */
@@ -289,8 +310,8 @@ async function buildForwardNodes(ctx: OneBotContext, target: MediaTarget, segmen
             }
         }
         nodes.push({
-            uin: Number(segment.data.user_id ?? ctx.selfId),
-            nickname: segment.data.nickname ?? '',
+            uin: Number(segment.data.user_id ?? segment.data.uin ?? ctx.selfId),
+            nickname: segment.data.nickname ?? segment.data.name ?? '',
             time: Math.floor(Date.now() / 1000),
             segments: outgoing,
         });
@@ -385,7 +406,10 @@ function requireMessage(input: unknown): Message {
 
 async function sendPrivate(ctx: OneBotContext, params: Record<string, unknown>) {
     const uin = asNumber(params.user_id);
-    const { segments, reply } = await buildOutgoingSegments(ctx, requireMessage(params.message), { kind: 'private', uin });
+    const { segments, reply } = await buildOutgoingSegments(ctx, requireMessage(params.message ?? params.messages), {
+        kind: 'private',
+        uin,
+    });
     if (segments.length === 0) {
         return ok({ message_id: 0 });
     }
@@ -395,7 +419,10 @@ async function sendPrivate(ctx: OneBotContext, params: Record<string, unknown>) 
 
 async function sendGroup(ctx: OneBotContext, params: Record<string, unknown>) {
     const groupUin = asNumber(params.group_id);
-    const { segments, reply } = await buildOutgoingSegments(ctx, requireMessage(params.message), { kind: 'group', groupUin });
+    const { segments, reply } = await buildOutgoingSegments(ctx, requireMessage(params.message ?? params.messages), {
+        kind: 'group',
+        groupUin,
+    });
     if (segments.length === 0) {
         return ok({ message_id: 0 });
     }
@@ -443,7 +470,14 @@ export async function handleAction(
         case 'send_group_msg':
             return sendGroup(ctx, params);
         case 'send_msg':
-            return params.message_type === 'group' ? sendGroup(ctx, params) : sendPrivate(ctx, params);
+            // 依据 group_id / user_id 参数路由（部分调用方只传 id 而不传 message_type）
+            if (params.group_id !== undefined) {
+                return sendGroup(ctx, params);
+            }
+            if (params.user_id !== undefined) {
+                return sendPrivate(ctx, params);
+            }
+            throw new DianaError(ErrorCode.Validation, 'send_msg 需要 group_id 或 user_id');
         case 'get_friend_list': {
             const result = await ctx.friend.fetchFriends();
             return ok(result.friends.map((friend) => ({ user_id: friend.uin, nickname: friend.nickname, remark: friend.remark })));
@@ -503,12 +537,15 @@ export async function handleAction(
             }
             return ok(null);
         }
-        case 'set_group_message_reaction': {
+        case 'set_group_message_reaction':
+        case 'set_msg_emoji_like': {
             const groupUin = asNumber(params.group_id);
             const sequence = asNumber(params.message_id);
             const code = String(params.code ?? params.emoji_id ?? '');
             const add = params.set === undefined ? true : Boolean(params.set);
-            await ctx.group.setMessageReaction(groupUin, sequence, code, 1, add);
+            // 对齐 NapCat/Lagrange：表情 ID 超过 3 位为 unicode 表情（type=2），QQ 表情为 1
+            const reactionType = code.length > 3 ? 2 : 1;
+            await ctx.group.setMessageReaction(groupUin, sequence, code, reactionType, add);
             return ok(null);
         }
         case 'set_group_ban': {
@@ -631,15 +668,222 @@ export async function handleAction(
         case 'clean_cache':
             ctx.message.clearCaches();
             return ok(null);
-        case 'get_cookies':
+        case 'get_cookies': {
+            const domains =
+                params.domain === undefined ? DEFAULT_COOKIE_DOMAINS
+                : Array.isArray(params.domain) ? params.domain.map(String)
+                : [String(params.domain)];
+            const cookies = await ctx.system.fetchCookies(domains);
+            return ok({ cookies: joinCookies(cookies) });
+        }
         case 'get_csrf_token':
-        case 'get_credentials':
-        case 'get_group_honor_info':
+            return ok({ token: await ctx.system.fetchCsrfToken() });
+        case 'get_credentials': {
+            const cookies = await ctx.system.fetchCookies(DEFAULT_COOKIE_DOMAINS);
+            return ok({ cookies: joinCookies(cookies), csrf_token: await ctx.system.fetchCsrfToken() });
+        }
+        case 'get_roam_msg': {
+            const uid = await resolveUid(ctx, asNumber(params.user_id));
+            const count = Math.min(asNumber(params.count ?? 20) || 20, 30);
+            const anchor = asNumber(params.message_seq ?? 0);
+            // 漫游以时间戳为锚点，未提供时从当前时间往回取
+            const time = anchor > 0 ? anchor : Math.floor(Date.now() / 1000);
+            const messages = await ctx.message.fetchRoamMessages(uid, time, count);
+            return ok({ messages: await Promise.all(messages.map((m) => toMessageData(m, createMediaUrlResolver(ctx, m)))) });
+        }
+        case 'upload_group_file': {
+            const groupUin = asNumber(params.group_id);
+            const file = String(params.file ?? '');
+            const data = await resolveFile(file);
+            const fileName = String(params.name ?? '') || inferFileName(file);
+            if (!fileName) {
+                throw new DianaError(ErrorCode.Validation, '缺少文件名且无法从路径推断');
+            }
+            await ctx.groupFile.upload(groupUin, String(params.folder ?? '/'), fileName, data, computeMediaMetadata(data));
+            return ok(null);
+        }
+        case 'upload_private_file': {
+            const uin = asNumber(params.user_id);
+            const file = String(params.file ?? '');
+            const data = await resolveFile(file);
+            const fileName = String(params.name ?? '') || inferFileName(file);
+            if (!fileName) {
+                throw new DianaError(ErrorCode.Validation, '缺少文件名且无法从路径推断');
+            }
+            const uid = await resolveUid(ctx, uin);
+            await ctx.privateFile.upload(uin, uid, fileName, data, computeMediaMetadata(data));
+            return ok(null);
+        }
+        case 'get_group_file_url': {
+            const url = await ctx.groupFile.getDownloadUrl(asNumber(params.group_id), String(params.file_id ?? ''));
+            return ok({ url });
+        }
+        case 'delete_group_file':
+            await ctx.groupFile.delete(asNumber(params.group_id), String(params.file_id ?? ''));
+            return ok(null);
+        case 'rename_group_file':
+            await ctx.groupFile.rename(
+                asNumber(params.group_id),
+                String(params.file_id ?? ''),
+                String(params.current_parent_directory ?? '/'),
+                String(params.new_name ?? ''),
+            );
+            return ok(null);
+        case 'move_group_file':
+            await ctx.groupFile.move(
+                asNumber(params.group_id),
+                String(params.file_id ?? ''),
+                String(params.current_parent_directory ?? '/'),
+                String(params.target_parent_directory ?? '/'),
+            );
+            return ok(null);
+        case 'create_group_file_folder': {
+            const folderId = await ctx.groupFile.createFolder(
+                asNumber(params.group_id),
+                String(params.name ?? params.folder_name ?? ''),
+            );
+            return ok({ folder_id: folderId });
+        }
+        case 'download_file': {
+            // 将远端 URL 下载到本地临时文件，返回本地路径（供调用方再作为 file 参数上传）
+            const url = String(params.url ?? '');
+            if (!url.startsWith('http://') && !url.startsWith('https://')) {
+                throw new DianaError(ErrorCode.Validation, `download_file 仅支持 http(s) URL: ${url}`);
+            }
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new DianaError(ErrorCode.Network, `下载文件失败 (${response.status}): ${url}`);
+            }
+            const data = Buffer.from(await response.arrayBuffer());
+            const name = decodeURIComponent(new URL(url).pathname.split('/').pop() ?? '') || 'file';
+            const path = join(tmpdir(), `diana-download-${randomUUID()}-${name}`);
+            await writeFile(path, data);
+            return ok({ file: path });
+        }
+        // 以下 action 在 NTQQ 协议层暂无可靠参照（资料设置 / 群头像 / 私聊文件下载 /
+        // 频道 / 在线客户端 / 机型展示 / 群荣誉 / 匿名消息 / 进程重启），
+        // 返回与官方实现一致的空结果，避免调用方因报错中断。
+        case 'set_qq_profile':
+        case 'set_qq_avatar':
+        case 'set_group_portrait':
+            return ok(null);
+        case 'set_essence_msg':
+        case 'delete_essence_msg': {
+            const groupUin = asNumber(params.group_id);
+            const sequence = asNumber(params.message_id);
+            // random 优先取缓存消息；缓存缺失时按序列号附近拉取群历史补齐
+            const random =
+                ctx.message.getCachedMessage(sequence)?.random ??
+                (await ctx.message.fetchGroupMessages(groupUin, Math.max(0, sequence - 10), sequence)).find(
+                    (message) => message.sequence === sequence,
+                )?.random ??
+                0;
+            if (!random) {
+                throw new DianaError(ErrorCode.Validation, `无法获取消息 ${sequence} 的 random，无法设置精华`);
+            }
+            if (action === 'set_essence_msg') {
+                await ctx.essence.set(groupUin, sequence, random);
+            } else {
+                await ctx.essence.unset(groupUin, sequence, random);
+            }
+            return ok(null);
+        }
+        case 'send_group_sign': {
+            const result = await ctx.group.clockIn(asNumber(params.group_id), ctx.selfId, ctx.appVersion);
+            return ok(result);
+        }
+        case 'delete_friend': {
+            const uid = await resolveUid(ctx, asNumber(params.user_id));
+            await ctx.friend.deleteFriend(uid, Boolean(params.block ?? false));
+            return ok(null);
+        }
+        case 'get_private_file_url':
+            return ok({ url: '' });
+        case 'get_group_file_system_info': {
+            const groupUin = asNumber(params.group_id);
+            const [count, space] = await Promise.all([ctx.groupFile.getFileCount(groupUin), ctx.groupFile.getSpace(groupUin)]);
+            return ok({
+                file_count: count.allCount,
+                limit_count: count.limitCount,
+                used_space: space.usedSpace,
+                total_space: space.totalSpace,
+            });
+        }
+        case 'get_group_root_files':
+        case 'get_group_files_by_folder': {
+            const groupUin = asNumber(params.group_id);
+            const folderId =
+                action === 'get_group_files_by_folder' ? String(params.folder_id ?? '/') : '/';
+            const result = await ctx.groupFile.listFiles(groupUin, folderId);
+            return ok({
+                file_count: result.files.length + result.folders.length,
+                total_limit: 0,
+                used_space: 0,
+                total_space: 0,
+                files: result.files.map((file) => ({
+                    file_id: file.fileId,
+                    file_name: file.fileName,
+                    bus_id: 102,
+                    file_size: file.fileSize,
+                    upload_time: file.uploadTime,
+                    dead_time: file.deadTime,
+                    modify_time: file.modifyTime,
+                    download_times: file.downloadTimes,
+                    uploader: String(file.uploaderUin),
+                    uploader_id: file.uploaderUin,
+                })),
+                folders: result.folders.map((folder) => ({
+                    folder_id: folder.folderId,
+                    folder_name: folder.folderName,
+                    create_time: folder.createTime,
+                    creator: String(folder.createUin),
+                    creator_id: folder.createUin,
+                    total_file_count: folder.totalFileCount,
+                })),
+            });
+        }
+        case 'get_essence_msg_list': {
+            const groupUin = asNumber(params.group_id);
+            const { messages } = await ctx.essence.fetchList(groupUin);
+            return ok(
+                messages.map((item) => ({
+                    group_id: item.groupUin,
+                    message_seq: item.sequence,
+                    message_random: item.random,
+                    sender_id: item.senderUin,
+                    sender_nick: item.senderNickname,
+                    sender_time: item.senderTime,
+                    operator_id: item.operatorUin,
+                    operator_nick: item.operatorNickname,
+                    operator_time: item.operatorTime,
+                    message_content: item.content,
+                })),
+            );
+        }
+        case '_set_model_show':
+        case 'set_model_show':
+        case 'set_restart':
         case 'set_group_anonymous':
         case 'set_group_anonymous_ban':
-        case 'set_restart':
-            // 无对应协议实现（网页登录态 / 群荣誉 / 匿名消息 / 进程重启）
-            return fail(1404, `暂不支持的 action: ${action}`);
+            return ok(null);
+        case '_get_model_show':
+        case 'get_model_show':
+            return ok({ variants: [] });
+        case 'get_online_clients':
+            return ok({ clients: [] });
+        case 'get_guild_list':
+            return ok([]);
+        case 'get_guild_service_profile':
+            return ok(null);
+        case 'get_group_honor_info':
+            return ok({
+                group_id: asNumber(params.group_id),
+                talkative_list: [],
+                performer_list: [],
+                legend_list: [],
+                strong_newbie_list: [],
+                emotion_list: [],
+            });
         default:
             return fail(1404, `不支持的 action: ${action}`);
     }

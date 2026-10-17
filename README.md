@@ -119,15 +119,15 @@ qrImageFile: .diana/qrcode.png     # 二维码图片保存路径
 
 | 分类 | Action |
 | --- | --- |
-| 信息 | `get_login_info`、`get_status`、`get_version_info`、`can_send_image`、`can_send_record` |
-| 消息 | `send_private_msg`、`send_group_msg`、`send_msg`、`delete_msg`、`get_msg`、`get_group_msg_history`、`get_friend_msg_history` |
+| 信息 | `get_login_info`、`get_status`、`get_version_info`、`can_send_image`、`can_send_record`、`get_model_show`、`set_model_show` |
+| 消息 | `send_private_msg`、`send_group_msg`、`send_msg`、`delete_msg`、`get_msg`、`get_group_msg_history`、`get_friend_msg_history`、`get_roam_msg` |
 | 转发 | `send_private_forward_msg`、`send_group_forward_msg`、`get_forward_msg` |
-| 媒体 | `get_image`、`get_record` |
-| 好友 | `get_friend_list`、`get_stranger_info`、`send_like`、`friend_poke`、`set_friend_add_request` |
-| 群 | `get_group_list`、`get_group_info`、`get_group_member_list`、`get_group_member_info`、`group_poke`、`send_poke`、`set_group_message_reaction`、`set_group_ban`、`set_group_whole_ban`、`set_group_card`、`set_group_kick`、`set_group_name`、`set_group_leave`、`set_group_admin`、`set_group_special_title`、`set_group_add_request` |
-| 其他 | `clean_cache` |
+| 媒体 | `get_image`、`get_record`、`download_file`、`upload_group_file`、`upload_private_file`、`get_group_file_url`、`get_group_file_system_info`、`get_group_root_files`、`get_group_files_by_folder`、`delete_group_file`、`rename_group_file`、`move_group_file`、`create_group_file_folder` |
+| 好友 | `get_friend_list`、`get_stranger_info`、`send_like`、`friend_poke`、`set_friend_add_request`、`delete_friend` |
+| 群 | `get_group_list`、`get_group_info`、`get_group_member_list`、`get_group_member_info`、`group_poke`、`send_poke`、`set_group_message_reaction`、`set_msg_emoji_like`、`set_essence_msg`、`delete_essence_msg`、`get_essence_msg_list`、`send_group_sign`、`set_group_ban`、`set_group_whole_ban`、`set_group_card`、`set_group_kick`、`set_group_name`、`set_group_leave`、`set_group_admin`、`set_group_special_title`、`set_group_add_request` |
+| 其他 | `clean_cache`、`set_qq_profile`、`set_qq_avatar`、`set_group_portrait` |
 
-暂不支持：`get_cookies`、`get_csrf_token`、`get_credentials`、`get_group_honor_info`、`set_group_anonymous`、`set_group_anonymous_ban`、`set_restart`。
+暂不支持：`get_cookies`、`get_csrf_token`、`get_credentials`、`get_private_file_url`、`get_group_honor_info`、`set_group_anonymous`、`set_group_anonymous_ban`、`set_restart`。
 
 ## 开发
 

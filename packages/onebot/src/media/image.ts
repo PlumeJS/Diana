@@ -1,4 +1,4 @@
-import { DianaError, ErrorCode, PicFormat } from '@diana/core';
+import { PicFormat } from '@diana/core';
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -87,8 +87,35 @@ function tiffSize(data: Buffer): { width: number; height: number } | undefined {
     return width !== undefined && height !== undefined ? { width, height } : undefined;
 }
 
+/** 构造 BMP 文件头（14 字节）。 */
+function bmpFileHeader(dataSize: number, dataOffset: number): Buffer {
+    const header = Buffer.alloc(14);
+    header.write('BM', 0, 'latin1');
+    header.writeUInt32LE(14 + dataSize, 2);
+    header.writeUInt32LE(dataOffset, 10);
+    return header;
+}
+
+/** 重建内嵌 BMP 位图：BITMAPINFOHEADER 之外补上文件头，并修正 ICO 双倍高度。 */
+function bmpFromIcoFrame(data: Buffer, offset: number, size: number): Buffer | undefined {
+    if (size < 40) {
+        return undefined;
+    }
+    const header = data.subarray(offset, offset + 40);
+    const bitCount = header.readUInt16LE(14);
+    const clrUsed = header.readUInt32LE(32);
+    const paletteSize = clrUsed > 0 ? clrUsed * 4 : bitCount <= 8 ? (1 << bitCount) * 4 : 0;
+    const pixelOffset = 14 + 40 + paletteSize;
+    const fixed = Buffer.from(header);
+    // ICO 的 biHeight 为「XOR 掩码+AND 掩码」双倍高度，标准 BMP 需减半
+    fixed.writeUInt32LE(Math.round(header.readUInt32LE(8) / 2), 8);
+    const body = data.subarray(offset + 40, offset + size);
+    return Buffer.concat([bmpFileHeader(body.length, pixelOffset), fixed, body]);
+}
+
 /**
- * 归一化图片数据：QQ 官方不支持 ICO 格式上传，若 ICO 内嵌 PNG 帧则直接提取为 PNG。
+ * 归一化图片数据：QQ 官方不支持 ICO 格式上传，
+ * 优先提取内嵌 PNG 帧；否则将内嵌 BMP 帧重建为标准 BMP 文件。
  */
 export function normalizeImage(data: Buffer): Buffer {
     if (data.length >= 8 && data[0] === 0 && data[1] === 0 && data[2] === 1 && data[3] === 0) {
@@ -100,15 +127,26 @@ export function normalizeImage(data: Buffer): Buffer {
             }
             const size = data.readUInt32LE(entry + 8);
             const offset = data.readUInt32LE(entry + 12);
-            if (offset + size <= data.length && data.subarray(offset, offset + 8).equals(PNG_SIGNATURE)) {
+            if (offset + size > data.length) {
+                continue;
+            }
+            if (data.subarray(offset, offset + 8).equals(PNG_SIGNATURE)) {
                 return data.subarray(offset, offset + size);
+            }
+            // 优先取最大帧（ico 第 0 帧通常即最大帧），仅处理第一帧
+            const bmp = index === 0 ? bmpFromIcoFrame(data, offset, size) : undefined;
+            if (bmp) {
+                return bmp;
             }
         }
     }
     return data;
 }
 
-/** 探测图片尺寸与格式，失败时抛出。 */
+/**
+ * 探测图片尺寸与格式。
+ * 无法识别时不再抛错：按 jpg 兜底上传（QQ 服务端按实际字节处理，避免非标准图片导致发送失败）。
+ */
 export function sniffImage(data: Buffer): ImageFormatInfo {
     if (data.length >= 24 && data.subarray(0, 8).equals(PNG_SIGNATURE)) {
         return { width: data.readUInt32BE(16), height: data.readUInt32BE(20), ext: 'png', format: PicFormat.PNG };
@@ -150,5 +188,6 @@ export function sniffImage(data: Buffer): ImageFormatInfo {
             return { ...size, ext: 'tiff', format: PicFormat.TIFF };
         }
     }
-    throw new DianaError(ErrorCode.Validation, '无法识别图片格式，支持 jpg/png/gif/bmp/webp/tiff');
+    // 无法识别格式：按 jpg 兜底并给默认尺寸（服务端按实际字节解析，0 尺寸会被拒绝）
+    return { width: 480, height: 480, ext: 'jpg', format: PicFormat.JPEG };
 }

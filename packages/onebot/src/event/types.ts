@@ -98,6 +98,8 @@ export interface NoticeEvent extends EventBase {
     action_img_url?: string;
     /** 扩展：戳一戳后缀文本。 */
     suffix?: string;
+    /** 扩展：撤回者昵称（好友撤回为对端昵称，群撤回为消息作者群名片/昵称）。 */
+    nickname?: string;
 }
 
 /** 请求事件。 */

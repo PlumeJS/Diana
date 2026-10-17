@@ -3,7 +3,14 @@ import type { DeviceInfo } from '../common/device-info.js';
 import { DianaError, ErrorCode } from '../common/errors.js';
 import { createLogger } from '../common/logger.js';
 import type { Logger } from '../common/logger.js';
-import { fetchFaceDetailsContract, fetchFaceDetailsResponseContract } from '../packet/oidb/index.js';
+import {
+    fetchClientKeyContract,
+    fetchClientKeyResponseContract,
+    fetchCookiesContract,
+    fetchCookiesResponseContract,
+    fetchFaceDetailsContract,
+    fetchFaceDetailsResponseContract,
+} from '../packet/oidb/index.js';
 import type { FaceInfo } from '../packet/oidb/index.js';
 import {
     InfoSyncPush,
@@ -40,6 +47,16 @@ const DEFAULT_HEARTBEAT_INTERVAL = 4.5 * 60 * 1000;
 /** 认可的心跳间隔范围（毫秒）。 */
 const MIN_HEARTBEAT_INTERVAL = 30 * 1000;
 const MAX_HEARTBEAT_INTERVAL = 10 * 60 * 1000;
+/** 计算 CSRF Token 时使用的域名。 */
+const CSRF_DOMAIN = 'qun.qq.com';
+/** Cookie 缓存有效期（毫秒）。 */
+const COOKIE_CACHE_TTL = 5 * 60 * 1000;
+/** skey 缓存有效期（毫秒）。 */
+const SKEY_CACHE_TTL = 24 * 60 * 60 * 1000;
+/** 获取 skey 的跳转链接（对齐 acidify 的 TicketContext.getSKey）。 */
+const SKEY_JUMP_URL =
+    'https%3A%2F%2Fh5.qzone.qq.com%2Fqqnt%2Fqzoneinpcqq%2Ffriend%3Frefresh%3D0%26clientuin%3D0%26darkMode%3D0' +
+    '&keyindex=19&random=2599';
 
 /** 被踢下线信息。 */
 export interface KickInfo {
@@ -63,6 +80,13 @@ export interface SystemContext {
 export class SystemService {
     private readonly logger: Logger;
     private readonly faces = new Map<string, FaceInfo>();
+    /** Cookie 缓存，键为归一化后的域名集合。 */
+    private readonly cookieCache = new Map<string, { value: Record<string, string>; expires: number }>();
+    /** 正在进行的 p_skey 请求（单飞），并发调用共享同一请求。 */
+    private readonly cookieInflight = new Map<string, Promise<string>>();
+    /** 缓存的 skey 与过期时间。 */
+    private skey = '';
+    private skeyExpires = 0;
     private readonly kickHandlers = new Set<KickHandler>();
     private readonly pushHandler: (packet: PushPacket) => void;
     private heartbeatTimer?: NodeJS.Timeout;
@@ -154,6 +178,113 @@ export class SystemService {
         }
         this.logger.info(`加载了 ${details.length} 条表情信息`);
         return details.length;
+    }
+
+    /** 拉取指定域名的网页 Cookie，返回键值对。
+     *
+     * 对齐 acidify 的 getCookies：Cookie 由基础凭据（uin/skey/p_uin/p_skey）组成——
+     * p_skey 来自 OIDB 0x102A_0（按域请求，个别域无权限时跳过），skey 通过
+     * 0x102A_1 clientKey + ssl.ptlogin2.qq.com 跳转获取，所有域都可用。
+     */
+    async fetchCookies(domains: string[]): Promise<Record<string, string>> {
+        const uin = this.ctx.transport.session.uin;
+        const base: Record<string, string> = { uin: `o${uin}`, p_uin: `o${uin}` };
+        const results = await Promise.all([
+            this.fetchSkey().catch((error) => {
+                this.logger.debug('获取 skey 失败', error);
+                return '';
+            }),
+            ...[...new Set(domains)].map(async (domain) => {
+                try {
+                    return await this.fetchDomainPskey(domain);
+                } catch (error) {
+                    this.logger.debug(`拉取 Cookie 失败 (domain=${domain})`, error);
+                    return '';
+                }
+            }),
+        ]);
+        const [skey, ...pskeys] = results;
+        if (skey) {
+            base.skey = skey;
+        }
+        for (const pskey of pskeys) {
+            if (pskey) {
+                base.p_skey = pskey;
+                break;
+            }
+        }
+        return base;
+    }
+
+    /** 拉取单个域名的 p_skey（带缓存与单飞）。 */
+    private async fetchDomainPskey(domain: string): Promise<string> {
+        const cached = this.cookieCache.get(domain);
+        if (cached && cached.expires > Date.now()) {
+            return cached.value.p_skey ?? '';
+        }
+        let task = this.cookieInflight.get(domain);
+        if (!task) {
+            task = (async () => {
+                const response = await this.ctx.oidb.call(fetchCookiesContract, fetchCookiesResponseContract, { domains: [domain] });
+                const value = response.urls.find((item) => item.key === domain)?.value ?? '';
+                if (!value) {
+                    throw new DianaError(ErrorCode.Oidb, `域名 ${domain} 未返回 pskey`);
+                }
+                this.cookieCache.set(domain, { value: { p_skey: value }, expires: Date.now() + COOKIE_CACHE_TTL });
+                return value;
+            })().finally(() => {
+                this.cookieInflight.delete(domain);
+            });
+            this.cookieInflight.set(domain, task);
+        }
+        return task;
+    }
+
+    /** 获取 skey：0x102A_1 clientKey → ssl.ptlogin2.qq.com 跳转（对齐 acidify 的 TicketContext.getSKey）。 */
+    private async fetchSkey(): Promise<string> {
+        if (this.skey && this.skeyExpires > Date.now()) {
+            return this.skey;
+        }
+        const clientKey = await this.fetchClientKey();
+        if (!clientKey) {
+            throw new DianaError(ErrorCode.Oidb, 'clientKey 为空，无法获取 skey');
+        }
+        const uin = this.ctx.transport.session.uin;
+        const url =
+            `https://ssl.ptlogin2.qq.com/jump?ptlang=1033&clientuin=${uin}` +
+            `&clientkey=${clientKey}&u1=${SKEY_JUMP_URL}`;
+        const response = await fetch(url, { redirect: 'manual' });
+        const raw = response.headers.get('set-cookie') ?? '';
+        const match = /skey=([^;]+)/.exec(raw);
+        if (!match) {
+            throw new DianaError(ErrorCode.Oidb, `跳转响应中未找到 skey (status=${response.status})`);
+        }
+        this.skey = match[1] ?? '';
+        this.skeyExpires = Date.now() + SKEY_CACHE_TTL;
+        return this.skey;
+    }
+
+    /** 拉取 client key（OIDB 0x102A）。 */
+    async fetchClientKey(): Promise<string> {
+        const response = await this.ctx.oidb.call(fetchClientKeyContract, fetchClientKeyResponseContract, {});
+        return response.clientKey ?? '';
+    }
+
+    /** 计算 CSRF Token（bkn），基于 skey 的 hash33（对齐 acidify 的 getCsrfToken）。 */
+    async fetchCsrfToken(): Promise<number> {
+        let skey = '';
+        try {
+            skey = await this.fetchSkey();
+        } catch (error) {
+            this.logger.warn('获取 skey 失败，回退 p_skey 计算 bkn', error);
+            const cookies = await this.fetchCookies([CSRF_DOMAIN]);
+            skey = cookies.p_skey ?? '';
+        }
+        let bkn = 5381;
+        for (const char of skey) {
+            bkn = (bkn * 33 + char.charCodeAt(0)) >>> 0;
+        }
+        return bkn & 0x7fffffff;
     }
 
     /** 拉取并配置高速上传服务器。 */

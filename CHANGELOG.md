@@ -5,6 +5,29 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.1.0] - 2026-10-17
+
+### 新增
+
+- **OneBot 11（`@diana/onebot`）**
+  - 新增 action：`set_msg_emoji_like`（贴表情，与 `set_group_message_reaction` 共用实现，表情 ID 长度自动区分 QQ/unicode 表情）。
+  - 新增 action：`set_essence_msg`、`delete_essence_msg`、`get_essence_msg_list`（群精华）。
+  - 新增 action：`send_group_sign`（群打卡）。
+  - 新增 action：`delete_friend`（删除好友）。
+  - 新增 action：`get_group_file_system_info`、`get_group_root_files`、`get_group_files_by_folder`（群文件系统）。
+
+### 修复
+
+- **事件**
+  - 好友消息事件 `sender.nickname` 缺失时回退到 uid 目录解析好友昵称。
+  - 不再向客户端推送自身消息事件。
+  - 自身撤回好友消息时，`user_id` 与昵称改用对端解析（修复显示 QQ 号 `0`）。
+  - 群撤回通知事件补充 `nickname` 字段。
+- **横幅**
+  - 版本号改读根 `package.json`，并新增 Node.js 版本展示。
+- **媒体**
+  - 视频闪传单块上传失败自动重试（最多 3 次，指数退避），日志补充 `error.cause` 详情。
+
 ## [Unreleased]
 
 ### 新增

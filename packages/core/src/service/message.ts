@@ -108,8 +108,8 @@ const SEND_FORWARD_MSG_TYPE = { group: 3, private: 1 } as const;
 /** 拉取长消息 msgType：群聊 1、私聊 3（与发送相反）。 */
 const FETCH_FORWARD_MSG_TYPE = { group: 1, private: 3 } as const;
 
-/** 撤回缓存上限。 */
-const RECALL_CACHE_LIMIT = 512;
+/** 缓存上限（含推送与历史拉取的消息，供 `get_msg` / 引用解析查询）。 */
+const RECALL_CACHE_LIMIT = 4096;
 
 /** 写入有界缓存，超出上限时淘汰最早的条目。 */
 function putBounded<K, V>(cache: Map<K, V>, key: K, value: V, limit: number): void {
@@ -289,6 +289,8 @@ export interface IncomingMessage {
     repliedSequence?: number;
     /** 消息唯一 id（contentHead.msgUid），回复时写入 srcMsg.pbReserve。 */
     messageUid?: bigint;
+    /** 消息随机数（contentHead.random），设置群精华时使用。 */
+    random?: number;
     /** 原始富文本元素，回复时作为 srcMsg.elems 原样回传。 */
     elements?: Buffer[];
     segments: IncomingSegment[];
@@ -485,6 +487,21 @@ function parseText(element: InferProtoModel<typeof MessageElement.fields>): Inco
     if (!text) {
         return undefined;
     }
+    // 提及元数据优先取 pbReserve（对齐 Lagrange MentionEntity/TextResvAttr），回退 attr6Buf
+    const reserve = text.pbReserve;
+    if (reserve && reserve.length > 0) {
+        try {
+            const extra = MentionExtra.decode(reserve);
+            if (extra.type === MentionType.All) {
+                return { type: 'mention', name: text.str ?? '', uin: 0 };
+            }
+            if (extra.type === MentionType.Someone && extra.uin) {
+                return { type: 'mention', name: text.str ?? '', uin: extra.uin };
+            }
+        } catch {
+            // 非提及元数据，回退 attr6Buf
+        }
+    }
     if (text.attr6Buf && text.attr6Buf.length >= 11) {
         return { type: 'mention', name: text.str ?? '', uin: text.attr6Buf.readUInt32BE(7) };
     }
@@ -621,16 +638,28 @@ export function parsePushMessage(message: InferProtoModel<typeof PushMsgBody.fie
 
     const segments: IncomingSegment[] = [];
     let repliedSequence: number | undefined;
+    // 引用元素（srcMsg）后紧跟一个指向被引用者的 `@昵称` 占位文本，
+    // 服务端会把它标记为 mention，需跳过以免被当作真实 @ 上报
+    let repliedSenderUin: number | undefined;
+    let skipReplyMention = false;
     const rawElements = message.body?.richText?.elements ?? [];
     for (const raw of rawElements) {
         const element = MessageElement.decode(raw);
         const srcMsg = element.srcMsg;
         if (!repliedSequence && srcMsg) {
             repliedSequence = srcMsg.pbReserve?.friendSequence ?? srcMsg.origSeqs?.[0];
+            repliedSenderUin = srcMsg.senderUin || undefined;
+            skipReplyMention = true;
             continue;
         }
         const segment = parseElement(element);
         if (segment) {
+            if (skipReplyMention) {
+                skipReplyMention = false;
+                if (segment.type === 'mention' && repliedSenderUin !== undefined && segment.uin === repliedSenderUin) {
+                    continue;
+                }
+            }
             // 一张图片会同时携带兼容元素（notOnlineImage/customFace）与 NT 元素（common 48），
             // 仅保留 NT 段，避免同一张图被拆成两个段
             const previous = segments[segments.length - 1];
@@ -661,6 +690,7 @@ export function parsePushMessage(message: InferProtoModel<typeof PushMsgBody.fie
         sequence: group ? (message.contentHead.sequence ?? 0) : (message.contentHead.ntMsgSeq ?? 0),
         repliedSequence,
         messageUid: message.contentHead.msgUid,
+        random: message.contentHead.random ?? undefined,
         elements: rawElements,
         segments,
     };
@@ -1064,7 +1094,7 @@ export class MessageService {
         await this.recallPrivateMessage(uid, entry.clientSequence, entry.random, entry.timestamp, sequence);
     }
 
-    /** 拉取群历史消息（startSequence 到 endSequence 闭区间）。 */
+    /** 拉取群历史消息（startSequence 到 endSequence 闭区间），结果写入消息缓存。 */
     async fetchGroupMessages(groupUin: number, startSequence: number, endSequence: number): Promise<IncomingMessage[]> {
         const reply = await this.transport.send(
             GET_GROUP_MESSAGES_COMMAND,
@@ -1080,10 +1110,10 @@ export class MessageService {
         if (!('body' in reply)) {
             throw new DianaError(ErrorCode.Protocol, `拉取群历史消息失败 (retcode=${reply.retcode}): ${reply.extra}`);
         }
-        return parseHistory(SsoGetGroupMsgResponse.decode(reply.body).body?.messages);
+        return this.cacheHistory(parseHistory(SsoGetGroupMsgResponse.decode(reply.body).body?.messages));
     }
 
-    /** 拉取私聊历史消息（startSequence 到 endSequence 闭区间）。 */
+    /** 拉取私聊历史消息（startSequence 到 endSequence 闭区间），结果写入消息缓存。 */
     async fetchC2CMessages(uid: string, startSequence: number, endSequence: number): Promise<IncomingMessage[]> {
         const reply = await this.transport.send(
             GET_C2C_MESSAGES_COMMAND,
@@ -1096,10 +1126,10 @@ export class MessageService {
         if (!('body' in reply)) {
             throw new DianaError(ErrorCode.Protocol, `拉取私聊历史消息失败 (retcode=${reply.retcode}): ${reply.extra}`);
         }
-        return parseHistory(SsoGetC2CMsgResponse.decode(reply.body).messages);
+        return this.cacheHistory(parseHistory(SsoGetC2CMsgResponse.decode(reply.body).messages));
     }
 
-    /** 拉取漫游消息（count 上限 30，direction 1 向上、2 向下）。 */
+    /** 拉取漫游消息（count 上限 30，direction 1 向上、2 向下），结果写入消息缓存。 */
     async fetchRoamMessages(uid: string, time: number, count: number, direction = 2): Promise<IncomingMessage[]> {
         const reply = await this.transport.send(
             GET_ROAM_MESSAGES_COMMAND,
@@ -1108,7 +1138,7 @@ export class MessageService {
         if (!('body' in reply)) {
             throw new DianaError(ErrorCode.Protocol, `拉取漫游消息失败 (retcode=${reply.retcode}): ${reply.extra}`);
         }
-        return parseHistory(SsoGetRoamMsgResponse.decode(reply.body).messages);
+        return this.cacheHistory(parseHistory(SsoGetRoamMsgResponse.decode(reply.body).messages));
     }
 
     /** 拉取私聊最新消息序列号。 */
@@ -1132,6 +1162,17 @@ export class MessageService {
 
     private remember(sequence: number, entry: RecallEntry): void {
         putBounded(this.recallCache, sequence, entry, RECALL_CACHE_LIMIT);
+    }
+
+    /** 将历史拉取的消息写入缓存（`get_msg` / 引用解析可查），并记录撤回上下文。 */
+    private cacheHistory(messages: IncomingMessage[]): IncomingMessage[] {
+        for (const message of messages) {
+            putBounded(this.incomingCache, message.sequence, message, RECALL_CACHE_LIMIT);
+            if (message.type === MessageType.GroupMessage && message.groupUin !== undefined) {
+                this.remember(message.sequence, { kind: 'group', groupUin: message.groupUin });
+            }
+        }
+        return messages;
     }
 
     private async send(input: InferProtoModelInput<typeof PbSendMsg.fields>): Promise<SendResult> {

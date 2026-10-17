@@ -1,3 +1,4 @@
+export * from './essence.js';
 export * from './friend.js';
 export * from './group.js';
 export * from './group-file.js';

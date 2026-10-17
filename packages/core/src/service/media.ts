@@ -574,6 +574,15 @@ export class MediaService {
                     body: chunk,
                 },
             });
+            if (!(await this.flashTransferUploadChunk(start, req))) return false;
+        }
+        return true;
+    }
+
+    /** 上传单个闪传分块，网络异常时重试（最多 3 次，指数退避）。 */
+    private async flashTransferUploadChunk(start: number, req: Uint8Array): Promise<boolean> {
+        const maxRetries = 3;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 const response = await fetch(FLASH_TRANSFER_URL, {
                     method: 'POST',
@@ -595,12 +604,20 @@ export class MediaService {
                     this.log.error(`闪传上传块 ${start} 失败: ${resp.status}`);
                     return false;
                 }
+                return true;
             } catch (error) {
-                this.log.error('闪传上传块异常', error);
-                return false;
+                const err = error as Error & { cause?: unknown };
+                const detail = err.cause !== undefined ? ` (cause: ${String(err.cause)})` : '';
+                if (attempt < maxRetries) {
+                    this.log.warn(`闪传上传块 ${start} 异常，第 ${attempt}/${maxRetries} 次重试: ${err.message}${detail}`);
+                    await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+                } else {
+                    this.log.error(`闪传上传块 ${start} 异常（已重试 ${maxRetries} 次）: ${err.message}${detail}`);
+                    return false;
+                }
             }
         }
-        return true;
+        return false;
     }
 
     /** 构建高速通道扩展信息（`MsgInfo` 原样回传，仅解出所需字段）。 */

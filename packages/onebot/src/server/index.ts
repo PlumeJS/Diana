@@ -33,6 +33,8 @@ function previewSegment(segment: Segment): string {
             return segment.data.text;
         case 'at':
             return `@${segment.data.qq}`;
+        case 'reply':
+            return '[回复]';
         case 'face':
             return `[表情${segment.data.id}]`;
         case 'image':
@@ -107,10 +109,12 @@ function describeNotice(event: Extract<Ob11Event, { post_type: 'notice' }>): str
         return `${paint.sender(event.user_id)} ${action} ${target !== undefined ? paint.sender(target) : ''}`.trim();
     }
     if (event.notice_type === 'group_recall') {
-        return `${paint.sender(event.user_id)} 撤回了一条消息 [${event.message_id}]（操作者 ${paint.sender(event.operator_id)}）`;
+        const name = event.nickname ? `${event.nickname}(${event.user_id})` : String(event.user_id);
+        return `${paint.sender(name)} 撤回了一条消息 [${event.message_id}]（操作者 ${paint.sender(event.operator_id)}）`;
     }
     if (event.notice_type === 'friend_recall') {
-        return `撤回了一条消息 [${event.message_id}]`;
+        const name = event.nickname ? `${event.nickname}(${event.user_id})` : String(event.user_id);
+        return `${paint.sender(name)} 撤回了一条消息 [${event.message_id}]`;
     }
     if (event.notice_type === 'group_increase') {
         const by = event.operator_id ? `（操作者 ${paint.sender(event.operator_id)}）` : '';
@@ -171,6 +175,9 @@ export class OneBotServer {
     httpAddress?: AddressInfo;
 
     private readonly onMessage = (message: IncomingMessage): void => {
+        if (message.senderUin === this.ctx.selfId) {
+            return; // 不推送自身消息事件
+        }
         this.directory.remember(message.senderUid, message.senderUin);
         // 对齐 acidify：媒体段现场调 oidb 200 换取带新鲜 rkey 的下载 URL，避免透传过期 rkey
         const resolveUrl = async (segment: IncomingSegment) => {
@@ -210,7 +217,12 @@ export class OneBotServer {
             }
             return undefined;
         };
-        void toMessageEvent(message, this.ctx.selfId, resolveUrl).then(
+        void toMessageEvent(
+            message,
+            this.ctx.selfId,
+            resolveUrl,
+            (uid, groupUin) => this.directory.resolveName(uid, groupUin),
+        ).then(
             (event) => this.dispatch(event),
             (error) => this.log.warn('转换消息事件失败', error),
         );
@@ -229,8 +241,11 @@ export class OneBotServer {
     }
 
     private async handleNotify(notification: Notification): Promise<void> {
-        const notice = await toNoticeEvent(notification, this.ctx.selfId, (uid, groupUin) =>
-            this.directory.resolve(uid, groupUin),
+        const notice = await toNoticeEvent(
+            notification,
+            this.ctx.selfId,
+            (uid, groupUin) => this.directory.resolve(uid, groupUin),
+            (uid, groupUin) => this.directory.resolveName(uid, groupUin),
         );
         if (notice) {
             this.dispatch(notice);

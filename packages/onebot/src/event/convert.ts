@@ -18,45 +18,82 @@ export async function toSegment(segment: IncomingSegment, resolveUrl?: ResolveMe
         case 'text':
             return { type: 'text', data: { text: segment.content } };
         case 'mention':
-            return { type: 'at', data: { qq: String(segment.uin) } };
+            return {
+                type: 'at',
+                data: { qq: segment.uin === 0 ? 'all' : String(segment.uin), ...(segment.name ? { name: segment.name } : {}) },
+            };
         case 'face':
             return { type: 'face', data: { id: String(segment.id) } };
-        case 'image':
-            return { type: 'image', data: { file: segment.url ?? (await resolveUrl?.(segment)) ?? '' } };
-        case 'record':
-            return { type: 'record', data: { file: (await resolveUrl?.(segment)) ?? '' } };
+        case 'image': {
+            const url = segment.url ?? (await resolveUrl?.(segment));
+            return { type: 'image', data: { file: url ?? '', ...(url ? { url } : {}) } };
+        }
+        case 'record': {
+            const url = await resolveUrl?.(segment);
+            return { type: 'record', data: { file: url ?? '', ...(url ? { url } : {}) } };
+        }
         case 'lightApp':
             return { type: 'json', data: { data: segment.payload } };
         case 'forward':
             return { type: 'forward', data: { id: segment.resId } };
-        case 'video':
-            return { type: 'video', data: { file: (await resolveUrl?.(segment)) ?? '' } };
+        case 'video': {
+            const url = await resolveUrl?.(segment);
+            return { type: 'video', data: { file: url ?? '', ...(url ? { url } : {}) } };
+        }
     }
+}
+
+/** CQ 码文本转义（OneBot 11 标准）：纯文本中转义 & [ ]。 */
+function escapeText(text: string): string {
+    return text.replace(/&/g, '&amp;').replace(/\[/g, '&#91;').replace(/\]/g, '&#93;');
+}
+
+/** CQ 码函数参数转义（OneBot 11 标准）：转义 & [ ] ,。 */
+function escapeParam(value: string): string {
+    return escapeText(value).replace(/,/g, '&#44;');
 }
 
 function toCq(segment: Segment): string {
     switch (segment.type) {
         case 'text':
-            return segment.data.text;
+            return escapeText(segment.data.text);
         case 'at':
-            return `[CQ:at,qq=${segment.data.qq}]`;
+            return segment.data.qq === 'all'
+                ? '[CQ:at,qq=all]'
+                : `[CQ:at,qq=${escapeParam(segment.data.qq)}]`;
+        case 'reply':
+            return `[CQ:reply,id=${escapeParam(segment.data.id)}]`;
         case 'face':
-            return `[CQ:face,id=${segment.data.id}]`;
+            return `[CQ:face,id=${escapeParam(segment.data.id)}]`;
         case 'image':
-            return `[CQ:image,file=${segment.data.file}]`;
+            return `[CQ:image,file=${escapeParam(segment.data.file)}${segment.data.url ? `,url=${escapeParam(segment.data.url)}` : ''}]`;
         case 'record':
-            return `[CQ:record,file=${segment.data.file}]`;
+            return `[CQ:record,file=${escapeParam(segment.data.file)}${segment.data.url ? `,url=${escapeParam(segment.data.url)}` : ''}]`;
+        case 'video':
+            return `[CQ:video,file=${escapeParam(segment.data.file)}${segment.data.url ? `,url=${escapeParam(segment.data.url)}` : ''}]`;
+        case 'json':
+            return `[CQ:json,data=${escapeParam(segment.data.data)}]`;
         case 'forward':
-            return `[CQ:forward,id=${segment.data.id}]`;
+            return `[CQ:forward,id=${escapeParam(segment.data.id)}]`;
         default:
             return `[CQ:${segment.type}]`;
     }
+}
+
+/** 将入站消息转换为 OneBot 消息段数组，存在引用时前置 reply 段（id 为被引用消息的 message_id）。 */
+async function toSegments(message: IncomingMessage, resolveUrl?: ResolveMediaUrl): Promise<Segment[]> {
+    const segments = await Promise.all(message.segments.map((segment) => toSegment(segment, resolveUrl)));
+    if (message.repliedSequence !== undefined) {
+        segments.unshift({ type: 'reply', data: { id: String(message.repliedSequence) } });
+    }
+    return segments;
 }
 
 /** `get_msg` / 历史消息返回的消息数据。 */
 export interface MessageData {
     message_id: number;
     real_id: number;
+    message_type: 'private' | 'group';
     user_id: number;
     group_id?: number;
     time: number;
@@ -71,16 +108,18 @@ export async function toMessageData(
     resolveUrl?: ResolveMediaUrl,
 ): Promise<MessageData> {
     const isGroup = message.type === MessageType.GroupMessage;
-    const segments = await Promise.all(message.segments.map((segment) => toSegment(segment, resolveUrl)));
+    const segments = await toSegments(message, resolveUrl);
     return {
         message_id: message.sequence,
         real_id: message.sequence,
+        message_type: isGroup ? 'group' : 'private',
         user_id: message.senderUin,
         ...(isGroup ? { group_id: message.groupUin } : {}),
         time: message.time,
         message: segments,
         raw_message: segments.map(toCq).join(''),
-        sender: { user_id: message.senderUin, nickname: message.senderName },
+        // 群聊时 senderName 即群名片，私聊时为好友昵称
+        sender: { user_id: message.senderUin, nickname: message.senderName, ...(isGroup ? { card: message.senderName } : {}) },
     };
 }
 
@@ -89,9 +128,15 @@ export async function toMessageEvent(
     message: IncomingMessage,
     selfId: number,
     resolveUrl?: ResolveMediaUrl,
+    resolveName?: ResolveName,
 ): Promise<MessageEvent> {
     const isGroup = message.type === MessageType.GroupMessage;
-    const segments = await Promise.all(message.segments.map((segment) => toSegment(segment, resolveUrl)));
+    const segments = await toSegments(message, resolveUrl);
+    // 私聊推送的 friendName 经常缺失，回退到 uid 目录解析好友昵称
+    let nickname = message.senderName;
+    if (!nickname && !isGroup && resolveName) {
+        nickname = await resolveName(message.senderUid ?? '');
+    }
     return {
         time: message.time,
         self_id: selfId,
@@ -106,13 +151,17 @@ export async function toMessageEvent(
         font: 0,
         sender: {
             user_id: message.senderUin,
-            nickname: message.senderName,
+            nickname,
+            ...(isGroup ? { card: message.senderName } : {}),
         },
     };
 }
 
 /** uid → uin 解析器。 */
 export type ResolveUin = (uid: string, groupUin?: number) => Promise<number>;
+
+/** uid → 昵称解析器。 */
+export type ResolveName = (uid: string, groupUin?: number) => Promise<string>;
 
 function increaseSubType(changeType: number): string {
     return changeType === IncreaseType.Invite ? 'invite' : 'approve';
@@ -133,25 +182,36 @@ export async function toNoticeEvent(
     notification: Notification,
     selfId: number,
     resolveUin: ResolveUin,
+    resolveName?: ResolveName,
 ): Promise<NoticeEvent | undefined> {
     const base = { time: Math.floor(Date.now() / 1000), self_id: selfId, post_type: 'notice' as const };
     switch (notification.type) {
-        case 'friendRecall':
+        case 'friendRecall': {
+            // 对齐 Lagrange：自己撤回时 fromUid 是自己，事件主体应为对端（PeerUin）
+            const fromUin = await resolveUin(notification.fromUid);
+            const isSelf = fromUin === selfId;
+            const userId = isSelf ? await resolveUin(notification.toUid) : fromUin;
+            const nickname = (await resolveName?.(isSelf ? notification.toUid : notification.fromUid)) ?? '';
             return {
                 ...base,
                 notice_type: 'friend_recall',
-                user_id: await resolveUin(notification.fromUid),
+                user_id: userId,
                 message_id: notification.sequence,
+                ...(nickname ? { nickname } : {}),
             };
+        }
         case 'groupRecall': {
             const target = notification.messages[0];
+            const authorUid = target?.authorUid ?? '';
+            const nickname = (await resolveName?.(authorUid, notification.groupUin)) ?? '';
             return {
                 ...base,
                 notice_type: 'group_recall',
                 group_id: notification.groupUin,
-                user_id: await resolveUin(target?.authorUid ?? '', notification.groupUin),
+                user_id: await resolveUin(authorUid, notification.groupUin),
                 operator_id: await resolveUin(notification.operatorUid, notification.groupUin),
                 message_id: target?.sequence ?? 0,
+                ...(nickname ? { nickname } : {}),
             };
         }
         case 'groupMemberIncrease':

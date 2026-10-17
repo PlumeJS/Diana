@@ -109,8 +109,10 @@ describe('图片探测', () => {
         expect(normalizeImage(frame)).toBe(frame);
     });
 
-    it('无法识别时抛错', () => {
-        expect(() => sniffImage(Buffer.from('not an image'))).toThrow();
+    it('无法识别时按 jpg 兜底', () => {
+        const info = sniffImage(Buffer.from('not an image'));
+        expect(info.ext).toBe('jpg');
+        expect(info.format).toBe(PicFormat.JPEG);
     });
 });
 
